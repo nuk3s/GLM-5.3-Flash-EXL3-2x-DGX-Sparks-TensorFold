@@ -24,24 +24,35 @@ such run here read 77.9 tok/s against a true 127.9, a 39% error.
 | KV pool | ~4.0M tokens | **~7.7M tokens** | **+93%** |
 | prefill, 131K | 1,881.7 tok/s | **2,399 tok/s** | **+27.5%** |
 | TTFT p50, 1 stream | 143 ms | **104 ms** | **-27%** |
+| prose decode, 1 stream, upstream's sparkDash | 65.7 tok/s | **69.5 / 69.7 tok/s** | **+6%** |
 
-Pool varies per boot. Observed across seven boots: 7,649,280 / 7,686,144 / 7,692,288 / 7,710,720 /
-7,735,296 / 7,766,016 / 7,778,304. Quote a range, never a single figure.
+Pool varies per boot. Observed across eleven boots: 7,649,280 to 7,809,024 tokens. Quote a range, never a single figure.
 
-### Where it does not. Read this before citing anything above
+The decode row uses upstream's own harness: sparkDash DecodeBench, 400 tokens forced, temperature 0,
+thinking off, a 32-token warm-up, streamed, (n - 1) / (last token - first token). It ran twice in one
+window, on two boots of the engine, with the engine isolated and idle. Upstream states a 2,200 MHz GPU
+clock cap for its two-Spark table and says its TP=3 tables use the default configuration otherwise.
+Ours ran at default clocks (applied limit 2,418 MHz), so part of the +6% may be the clock.
 
-| | upstream TP=3, `PARALLEL=8` | here | delta |
-|---|---|---|---|
-| prose decode, 1 stream | 65.7 tok/s | 56.2 tok/s | **-14.5%** |
-| prose decode, 8 streams | 166.0 tok/s | 128.2 tok/s | **-22.8%** |
-| code decode, 8 streams | 211.5 tok/s | 161.2 tok/s | **-23.8%** |
+### Decode figures from different harnesses do not compare
 
-**Decode here is 14 to 24 percent below upstream's published figures on every cell, and the cause is
-not isolated.** Our decode lands at roughly upstream's published *two-Spark* level while pool and
-prefill gain. Known differences: our GPU clocks are not capped (2,418 MHz applied) where upstream's
-table was taken at 2,200 MHz; we run KV sharding and an 800 GiB spill tier, neither of which appears
-in any upstream table; and our harness is not upstream's sparkDash. Do not read the pool and prefill
-wins as a speed claim.
+Our own decode gate read **55.8 / 55.7 tok/s** on the same engine in the same window as the 69.5 /
+69.7 above. Milliseconds per decode round were close under both (43 on sparkDash against 42 on our
+gate). Accepted drafts per round differed (2.00 against 1.37): sparkDash runs a greedy hash-map
+explanation prompt, upstream's "Prose" column, our gate a temperature 0.7 essay, and the drafter accepts
+far more on the first. Formula and streaming mode together add 1 to 3 percent. An earlier version of this README put our gate's 56.2 beside upstream's 65.7 and
+called it a 14.5% decode deficit. That comparison mixed two harnesses.
+
+The 8-stream rows are still cross-harness and are **not** a valid comparison until they are measured
+on sparkDash here:
+
+| | upstream TP=3, `PARALLEL=8`, sparkDash | here, our gate |
+|---|---|---|
+| prose decode, 8 streams | 166.0 tok/s | 128.2 tok/s |
+| code decode, 8 streams | 211.5 tok/s | 161.2 tok/s |
+
+Other known differences: we run KV sharding and an 800 GiB spill tier. Upstream measured both only on
+two Sparks; neither is on in its TP=3 table.
 
 ### Things measured here that had no published number anywhere
 
