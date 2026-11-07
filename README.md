@@ -19,37 +19,55 @@ such run here read 77.9 tok/s against a true 127.9, a 39% error.
 
 ### Where this configuration leads upstream's published three-Spark table
 
-| | upstream TP=3, `PARALLEL=8` | here | delta |
+| | upstream TP=3, `PARALLEL=8` | here, `COMM=nccl` | delta |
 |---|---|---|---|
 | KV pool | ~4.0M tokens | **~7.7M tokens** | **+93%** |
 | prefill, 131K | 1,881.7 tok/s | **2,399 tok/s** | **+27.5%** |
 | TTFT p50, 1 stream | 143 ms | **104 ms** | **-27%** |
-| prose decode, 1 stream, upstream's sparkDash | 65.7 tok/s | **69.5 / 69.7 tok/s** | **+6%** |
+| prose decode, 1 stream, upstream's sparkDash | 65.7 tok/s | **69.5 to 69.8 tok/s** | **+6%** |
+| prose decode, 8 streams, upstream's sparkDash | 166.0 tok/s | **177.2 / 178.0 tok/s** | **+7%** |
+| code decode, 8 streams, upstream's sparkDash | 211.5 tok/s | **221.4 / 221.6 tok/s** | **+5%** |
 
 Pool varies per boot. Observed across eleven boots: 7,649,280 to 7,809,024 tokens. Quote a range, never a single figure.
 
-The decode row uses upstream's own harness: sparkDash DecodeBench, 400 tokens forced, temperature 0,
-thinking off, a 32-token warm-up, streamed, (n - 1) / (last token - first token). It ran twice in one
-window, on two boots of the engine, with the engine isolated and idle. Upstream states a 2,200 MHz GPU
-clock cap for its two-Spark table and says its TP=3 tables use the default configuration otherwise.
-Ours ran at default clocks (applied limit 2,418 MHz), so part of the +6% may be the clock.
+The decode rows use upstream's own harness. One stream: sparkDash DecodeBench, 400 tokens forced,
+temperature 0, thinking off, a 32-token warm-up, streamed, (n - 1) / (last token - first token), four
+runs on three boots. Eight streams: sparkDash's own concurrent wave, 400 tokens a stream, temperature 0,
+thinking off, on two boots. The figure is sparkDash's aggregate: the wave's decode tokens over the time
+from the first token of any stream to the last token of any stream. Upstream's "Prose" and "Code"
+columns report the same figure. Every run had the engine isolated and idle. Upstream states a 2,200 MHz
+GPU clock cap for its two-Spark table and says its TP=3 tables use the default configuration otherwise.
+Ours ran at default clocks (applied limit 2,418 MHz), so part of the lead may be the clock.
+
+### `COMM=roce` at TP=3
+
+Every upstream TP=3 table uses `COMM=nccl`. Here `COMM=roce` ran at TP=3 on 2026-11-07, against nccl in
+the same window, both on fresh boots. All three exactness prompts gave identical tokens, and accepted
+drafts per round were identical:
+
+| | `COMM=nccl` | `COMM=roce` | ms a round, change |
+|---|---|---|---|
+| prose decode, 1 stream, sparkDash | 69.81 tok/s | **76.74 tok/s** | **-9.0%** |
+| prose decode, 8 streams, sparkDash | 178.01 tok/s | 181.97 tok/s | -2.0% |
+| code decode, 8 streams, sparkDash | 221.57 tok/s | 225.07 tok/s | -1.1% |
+
+A decode round's all-gathers are small, and their cost is latency. Upstream measured a 16 KiB gather at
+11 us over RoCE against 45 us on NCCL. The gain is largest at one stream (43 ms a round) and smaller at
+8 streams (127 ms a round). This configuration runs `COMM=roce` since 2026-11-07, under a 48-hour watch
+that rolls back to nccl on a RoCE error line, a stall, an unplanned restart or the engine's broken latch.
+A RoCE setup error or a gather timeout ends the rank. The engine does not fall back to nccl on its own.
+`COMM=roce` with `TF_GLM_HC_SPLIT=1` is also the environment of upstream issue #163, a TP=2 wedge that
+is still open.
 
 ### Decode figures from different harnesses do not compare
 
-Our own decode gate read **55.8 / 55.7 tok/s** on the same engine in the same window as the 69.5 /
-69.7 above. Milliseconds per decode round were close under both (43 on sparkDash against 42 on our
-gate). Accepted drafts per round differed (2.00 against 1.37): sparkDash runs a greedy hash-map
-explanation prompt, upstream's "Prose" column, our gate a temperature 0.7 essay, and the drafter accepts
-far more on the first. Formula and streaming mode together add 1 to 3 percent. An earlier version of this README put our gate's 56.2 beside upstream's 65.7 and
-called it a 14.5% decode deficit. That comparison mixed two harnesses.
-
-The 8-stream rows are still cross-harness and are **not** a valid comparison until they are measured
-on sparkDash here:
-
-| | upstream TP=3, `PARALLEL=8`, sparkDash | here, our gate |
-|---|---|---|
-| prose decode, 8 streams | 166.0 tok/s | 128.2 tok/s |
-| code decode, 8 streams | 211.5 tok/s | 161.2 tok/s |
+Our own decode gate read **55.8 / 55.7 tok/s** at one stream, in the same window as the 69.5 / 69.7
+above, and 128.2 prose / 161.2 code at 8 streams on the same configuration two days earlier. Milliseconds per decode round were close under both
+harnesses at one stream (43 on sparkDash against 42 on our gate). Accepted drafts per round differed
+(2.00 against 1.37): sparkDash runs a greedy hash-map explanation prompt, upstream's "Prose" column, our
+gate a temperature 0.7 essay, and the drafter accepts far more on the first. Formula and streaming mode
+together add 1 to 3 percent. An earlier version of this README put our gate's figures beside upstream's
+and called them a 14 to 24% decode deficit. That comparison mixed two harnesses.
 
 Other known differences: we run KV sharding and an 800 GiB spill tier. Upstream measured both only on
 two Sparks; neither is on in its TP=3 table.
@@ -111,7 +129,7 @@ bootstrap rides the LAN netdev.
 
 ```sh
 TP=3
-COMM=nccl
+COMM=roce                         # since 2026-11-07 under the 48 h watch; nccl before, and the rollback target
 SOCKET_IFNAME=<lan netdev>        # NCCL out-of-band bootstrap; needs the LAN peer firewall rules
 PARALLEL=8
 HF_CACHE=<local nvme>             # each rank reads its own copy; load ~4 min against ~14 over NFS
