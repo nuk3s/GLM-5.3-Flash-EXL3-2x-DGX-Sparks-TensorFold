@@ -1,0 +1,12 @@
+# GLM-5.3 cutover (2026-11-02): run glm53-watchdog.service every 2 minutes.
+[Unit]
+Description=Run the GLM-5.3 watchdog every 2 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=2min
+AccuracySec=10s
+Unit=glm53-watchdog.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,13 @@
+# GLM-5.3 cutover (2026-11-02): one glm53-watchdog tick (glm53-watchdog.sh). Run by glm53-watchdog.timer.
+[Unit]
+Description=GLM-5.3 watchdog (probe :8888; restart glm53-serve when broken, stalled or not answering)
+After=docker.service glm53-serve.service
+
+[Service]
+Type=oneshot
+User=@GLM_USER@
+Group=@GLM_USER@
+Environment=HOME=@GLM_USER_HOME@
+ExecStart=/bin/bash @GLM_HOME@/bin/glm53-watchdog.sh
+# a tick: /health (10 s), the worker rank check over ssh (15 s) and at most one chat probe (120 s)
+TimeoutStartSec=300

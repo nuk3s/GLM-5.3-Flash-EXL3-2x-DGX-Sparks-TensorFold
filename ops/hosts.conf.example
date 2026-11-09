@@ -1,0 +1,20 @@
+# shellcheck shell=bash disable=SC2034
+# hosts.conf: this cluster's values for the ops scripts, the systemd units (glm53-units.sh) and local.sh.
+# Copy it to hosts.conf beside the scripts ($GLM_HOME/bin/hosts.conf) and set every value. Every line keeps a value
+# the environment already set (NAME=${NAME:-value}), so a test or a one-off run can override one name.
+# Do not leave a value empty. An empty value takes the script default, not "unset". Only NTFY_BASE may be empty.
+# The addresses below are documentation addresses (RFC 5737 and RFC 2544): replace them.
+GLM_USER=${GLM_USER:-user}                          # runs the engine on every rank (docker group, ssh key)
+GLM_USER_HOME=${GLM_USER_HOME:-$HOME}               # GLM_USER's home (the units' HOME)
+GLM_HOME=${GLM_HOME:-$HOME/glm53}                   # bin/ (the ops scripts), state/, logs/, kit/ (this repo)
+GLM_HEAD_LAN=${GLM_HEAD_LAN:-192.0.2.53}            # rank 0 (spark1): its LAN address, MASTER_ADDR at TP=3
+GLM_WORKER=${GLM_WORKER:-user@192.0.2.180}          # rank 1 (spark2): ssh target over the LAN
+GLM_WORKER2=${GLM_WORKER2:-user@192.0.2.216}        # rank 2 (spark3): ssh target over the LAN
+GLM_FABRIC_PEER=${GLM_FABRIC_PEER:-198.18.0.189}    # rank 1's CX7 address on the cable to the head
+GLM_FABRIC_PEER2=${GLM_FABRIC_PEER2:-198.18.4.216}  # rank 2's CX7 address on the cable to the head
+GLM_SOCKET_IFNAME=${GLM_SOCKET_IFNAME:-enP7s7}      # the LAN netdev on every rank (NCCL's bootstrap)
+GLM_HF_CACHE=${GLM_HF_CACHE:-$HOME/models/hf-cache}       # checkpoint and drafter, each rank's own disk
+GLM_SPILL_DIR=${GLM_SPILL_DIR:-$HOME/models/glm53-spill}  # the spill tier, the same path on every rank
+NTFY_BASE=${NTFY_BASE-}                             # an ntfy server for alerts; empty: no ntfy message at all
+NTFY_TOPIC_CRIT=${NTFY_TOPIC_CRIT:-alerts-critical} # the watchdog and the roce watch: failures
+NTFY_TOPIC_INFO=${NTFY_TOPIC_INFO:-alerts}          # the roce watch: its end

@@ -1,0 +1,68 @@
+# GLM-5.3-Flash-EXL3 on TensorFold (the MiaAI GLM kit, bf5f945) under systemd, on spark1. Added 2026-11-02 for the
+# GLM-5.3 cutover (docs/operations.md). Install copies it to /etc/systemd/system; enable and start it after
+# the kit's first interactive start.
+#
+# Supervision is the kit's own supported mode: FOREGROUND=1 (start.sh:370-394) starts rank 1 on spark2 over ssh, then
+# rank 0 here, follows rank 0's log and exits with its status; when rank 1 exits, its watcher stops rank 0 and exits
+# 1. PREPARE=0: the image and weights are prepared in the window, never by a restart. The engine settings are the
+# kit defaults (operator 2026-11-02) plus scripts/local.sh (ops/local.sh: workers, fabric addresses, each rank's NVMe
+# weights, the port and the image tag). Safety around it, none of it an engine setting:
+#   - a system unit that runs as GLM_USER (its docker group and ssh key to spark2);
+#   - ExecStartPre: the start stamp that glm53-watchdog's 40-min grace reads, then glm53-prestart.sh: wait for spark2's
+#     ssh, refuse when rank 0 or another engine already runs, stop a lone rank 1 on spark2 (the state after a head hang
+#     and a power cycle, kit issue #159), refuse under 95 GiB MemAvailable on a node (110 at TP=2). Under
+#     FOREGROUND=1 start.sh skips the kit's retries (the smaller window, the SPLIT=0 retry of issue #36) and exits 0
+#     when the containers already run, so these must fail the unit instead of looping. Then glm53-memguard.sh
+#     start: memguard on all three nodes at 2.5 GiB (the GLM kit has none), when
+#     ~/glm53/bin/memguard.sh is installed. TimeoutStartSec (420 s) bounds the pre-steps;
+#   - Type=simple: the unit is "active" while the model loads. Each rank reads its own NVMe copy of the checkpoint
+#     (local.sh), so a TP=3 start takes 2.5 to 6 min, plus ~5 min for the first kernel build on a node. The glm53
+#     watch reads that as a planned start for 40 min (GLM_START_GRACE_S 2400), and glm53-watchdog's grace is 40 min:
+#     both date from loads over NFS (10-25 min) and keep a wide margin;
+#   - restarts: any exit of the engine restarts after 60 s (Restart=on-failure, and RestartForceExitStatus for 0 and
+#     143: an engine that ends by itself, cleanly or on a stray SIGTERM, must come back). `systemctl stop` never
+#     restarts: start.sh's SIGTERM trap runs stop.sh and exits 130, or rank 0 exits 143 after stop.sh's docker stop;
+#     both count as success. 5 starts in 30 min (StartLimitBurst=5): the kit's issue #36 fails
+#     about half of the first NCCL connections with SPLIT=1 on some pairs, and FOREGROUND=1 does not retry it;
+#   - ExecStopPost: docker stop of all three ranks as the backstop when stop.sh did not run (SIGKILL after the timeout).
+#     The spark3 line was added 2026-11-06 (TP=3 rank 2); before it, a SIGKILLed stop left rank 2 up until the next start.
+#     Not docker rm: the next start.sh saves a stopped container's log before it removes it (a crash's evidence).
+#     glm53-prestart.sh refuses a RUNNING rank 0, so the backstop also keeps the next start from exiting 0. Then
+#     memguard off on all three nodes.
+# Do not combine with a per-container restart policy. glm53-watchdog.timer adds the broken/stall/hang checks.
+[Unit]
+Description=GLM-5.3-Flash-EXL3 on TensorFold (MiaAI GLM kit): rank 0 on spark1, rank 1 on spark2 @GLM_WORKER_HOST@ over ssh
+After=docker.service network-online.target remote-fs.target
+Wants=network-online.target
+Conflicts=tf-serve.service
+StartLimitIntervalSec=30min
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=@GLM_USER@
+Group=@GLM_USER@
+Environment=HOME=@GLM_USER_HOME@
+WorkingDirectory=@GLM_HOME@/kit
+Environment=FOREGROUND=1 PREPARE=0
+ExecStartPre=/bin/sh -c 'mkdir -p @GLM_HOME@/state && date +%%s > @GLM_HOME@/state/last-start'
+ExecStartPre=/bin/bash @GLM_HOME@/bin/glm53-prestart.sh
+ExecStartPre=/bin/bash @GLM_HOME@/bin/glm53-memguard.sh start
+ExecStart=/usr/bin/bash ./start.sh
+ExecStop=/usr/bin/bash ./stop.sh
+ExecStopPost=-/bin/sh -c '/usr/bin/docker stop -t 30 glm53-flash-tf >/dev/null 2>&1; true'
+ExecStopPost=-/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=10 @GLM_WORKER@ 'docker stop -t 30 glm53-flash-tf >/dev/null 2>&1; true'
+ExecStopPost=-/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=10 @GLM_WORKER2@ 'docker stop -t 30 glm53-flash-tf >/dev/null 2>&1; true'
+ExecStopPost=-/bin/bash @GLM_HOME@/bin/glm53-memguard.sh stop
+Restart=on-failure
+RestartSec=60s
+RestartForceExitStatus=0 143
+SuccessExitStatus=130 143
+TimeoutStartSec=420s
+# stop.sh: docker stop -t 30 a rank, both in parallel, then the logs are saved; the ExecStopPost backstop adds 30 s
+TimeoutStopSec=150s
+# SIGTERM to start.sh only (its trap runs stop.sh); SIGKILL to what is left after it ends
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

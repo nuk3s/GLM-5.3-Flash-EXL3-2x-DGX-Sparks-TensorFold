@@ -1,195 +1,88 @@
 # GLM-5.3-Flash-EXL3 on three DGX Sparks at TP=3
 
-A stripped fork of [MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold),
-cut down to the one configuration this lab runs in production: **three GB10 nodes, TP=3, 8 lanes, a
-1,048,576-token window, FP8 KV, KV sharding on, vision on, an NVMe spill tier.**
-
-Upstream is the real work. This fork exists because upstream documents every knob for every topology,
-and we needed one page describing one deployment, plus the measurements we took on it. Read upstream
-first if you want options. Read this if you want numbers from a three-node ring.
-
-Base commit `bf5f945`. `patches/` is **byte-identical to upstream** (verified: zero diff). See
-[What changed](#what-changed).
-
-## Measurements from this configuration
-
-All taken with the engine firewalled off from its gateway and `requests_running` confirmed 0 first.
-A throughput figure taken while production traffic is in flight is contention, not a measurement: one
-such run here read 77.9 tok/s against a true 127.9, a 39% error.
-
-### Where this configuration leads upstream's published three-Spark table
-
-| | upstream TP=3, `PARALLEL=8` | here, `COMM=nccl` | delta |
-|---|---|---|---|
-| KV pool | ~4.0M tokens | **~7.7M tokens** | **+93%** |
-| prefill, 131K | 1,881.7 tok/s | **2,399 tok/s** | **+27.5%** |
-| TTFT p50, 1 stream | 143 ms | **104 ms** | **-27%** |
-| prose decode, 1 stream, upstream's sparkDash | 65.7 tok/s | **69.5 to 69.8 tok/s** | **+6%** |
-| prose decode, 8 streams, upstream's sparkDash | 166.0 tok/s | **177.2 / 178.0 tok/s** | **+7%** |
-| code decode, 8 streams, upstream's sparkDash | 211.5 tok/s | **221.4 / 221.6 tok/s** | **+5%** |
-
-Pool varies per boot. Observed across eleven boots: 7,649,280 to 7,809,024 tokens. Quote a range, never a single figure.
-
-The decode rows use upstream's own harness. One stream: sparkDash DecodeBench, 400 tokens forced,
-temperature 0, thinking off, a 32-token warm-up, streamed, (n - 1) / (last token - first token), four
-runs on three boots. Eight streams: sparkDash's own concurrent wave, 400 tokens a stream, temperature 0,
-thinking off, on two boots. The figure is sparkDash's aggregate: the wave's decode tokens over the time
-from the first token of any stream to the last token of any stream. Upstream's "Prose" and "Code"
-columns report the same figure. Every run had the engine isolated and idle. Upstream states a 2,200 MHz
-GPU clock cap for its two-Spark table and says its TP=3 tables use the default configuration otherwise.
-Ours ran at default clocks (applied limit 2,418 MHz), so part of the lead may be the clock.
-
-### `COMM=roce` at TP=3
-
-Every upstream TP=3 table uses `COMM=nccl`. Here `COMM=roce` ran at TP=3 on 2026-11-07, against nccl in
-the same window, both on fresh boots. All three exactness prompts gave identical tokens, and accepted
-drafts per round were identical:
-
-| | `COMM=nccl` | `COMM=roce` | ms a round, change |
-|---|---|---|---|
-| prose decode, 1 stream, sparkDash | 69.81 tok/s | **76.74 tok/s** | **-9.0%** |
-| prose decode, 8 streams, sparkDash | 178.01 tok/s | 181.97 tok/s | -2.0% |
-| code decode, 8 streams, sparkDash | 221.57 tok/s | 225.07 tok/s | -1.1% |
-
-A decode round's all-gathers are small, and their cost is latency. Upstream measured a 16 KiB gather at
-11 us over RoCE against 45 us on NCCL. The gain is largest at one stream (43 ms a round) and smaller at
-8 streams (127 ms a round). This configuration runs `COMM=roce` since 2026-11-07, under a 48-hour watch
-that rolls back to nccl on a RoCE error line, a stall, an unplanned restart or the engine's broken latch.
-A RoCE setup error or a gather timeout ends the rank. The engine does not fall back to nccl on its own.
-`COMM=roce` with `TF_GLM_HC_SPLIT=1` is also the environment of upstream issue #163, a TP=2 wedge that
-is still open.
-
-### Decode figures from different harnesses do not compare
-
-Our own decode gate read **55.8 / 55.7 tok/s** at one stream, in the same window as the 69.5 / 69.7
-above, and 128.2 prose / 161.2 code at 8 streams on the same configuration two days earlier. Milliseconds per decode round were close under both
-harnesses at one stream (43 on sparkDash against 42 on our gate). Accepted drafts per round differed
-(2.00 against 1.37): sparkDash runs a greedy hash-map explanation prompt, upstream's "Prose" column, our
-gate a temperature 0.7 essay, and the drafter accepts far more on the first. Formula and streaming mode
-together add 1 to 3 percent. An earlier version of this README put our gate's figures beside upstream's
-and called them a 14 to 24% decode deficit. That comparison mixed two harnesses.
-
-Other known differences: we run KV sharding and an 800 GiB spill tier. Upstream measured both only on
-two Sparks; neither is on in its TP=3 table.
-
-### Things measured here that had no published number anywhere
-
-**Content moves decode 26 percent, and the usual benchmark hides it.** Same engine, same config, only
-the prompt content changed: **code and structured output 161.2 tok/s at 8 streams against prose
-128.2.** Per-draft acceptance is 73.2% on code against 49.3% on prose. Any decode figure from a prose
-gate understates what agent traffic gets.
-
-**Real-traffic drafter acceptance, over 176,152 decode rounds in a 12-hour window:** 60.0% acceptance
-(median 59.7, range 39.3-88.8), **2.28 accepted tokens a round**, 3.79 drafts a round. That sits
-between the two synthetic workloads and is a third independent confirmation that DFlash2 performs to
-its published curve (predicted 2.314, bench 2.324, real traffic 2.28).
-
-**Prefix cache hit rate on real traffic: 95.75%** (13,003,456 cached of 13,580,849 prompt tokens over
-a two-minute window), with TTFT of 0.94 s for a 487,378-token prompt.
-
-**`TF_GLM_MULTI_DEPTH=scale:A`, first measurement anywhere:** +2.3% prose, **-5.9% code**, saturating
-between A=1 and A=2. It raises each stream's stop threshold, so rounds draft shorter, higher-confidence
-chains. That is free speed when acceptance is low and a loss when it is high, which is why it inverts
-by workload.
-
-**`TF_GLM_MULTI_DEPTH=joint` carries all of upstream PR #141's bundle.** Measured individually at
-TP=3: `packed` flat, `async` flat, `TF_GLM_EXL3_LOADS=nc2`/`nc4` flat, `TF_GLM_QMM_CLUSTERS=1` a
-regression. The full four-setting bundle repeats at **+4.6% at C8** against the author's +4.10%, and
-costs 2.1% at one stream. Posted upstream on #141.
-
-**KV sharding costs 3.8% prose and 3.0% code at one stream and buys 2.68x the pool.** Measured as a
-direct A/B: pool 7,778,304 sharded against 2,902,016 unsharded, decode 55.6 against 57.8 tok/s. Worth
-it here by a wide margin.
-
-## Two things that cost us three windows
-
-**A three-rank cluster needs LAN peer rules in the host firewall, not only the ring interfaces.**
-NCCL's out-of-band bootstrap is a ring over each node's LAN netdev on ephemeral ports, not over the
-CX7 cables. One node's firewall had no peer rules, so `ncclCommInitRank` hung forever with no error
-and no log line. Three engine windows found nothing; a standalone 3-rank NCCL test named the stage in
-one three-minute run with no downtime. If a 3-rank bring-up hangs with logs ending at plugin load,
-check the firewall before touching the engine.
-
-**`TP`, `COMM` and `SOCKET_IFNAME` must live in `scripts/local.sh`, not in `start-tp3.sh`'s exports.**
-A systemd unit that runs `./start.sh` will otherwise silently serve the pair with the third worker
-configured and unused. A dry-run compare across 13 settings caught this before it shipped.
-
-**`TF_GLM_KV_SHARD=1` is refused at one lane.** The engine says so plainly:
-`TF_GLM_KV_SHARD=1 needs --parallel above 1, two ranks or more, and no TF_GLM_MULTI_LONE`. Sharding
-and single-lane are mutually exclusive.
+This repository is the TP=3 configuration of one three-node GB10 cluster: the MiaAI-Lab GLM-5.3-Flash-EXL3
+TensorFold kit at its commit `bf5f945`, cut to one configuration, plus the supervision stack, the image and the
+measurements of the cluster. It is a fork of
+[MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold).
+The kit's README now names a successor recipe for two nodes. This repository stays on the kit at `bf5f945`,
+because the successor does not serve three nodes.
 
 ## The configuration
 
-Topology is a switchless triangle: three QSFP DACs, each CX7 with two physical ports showing as two
-PCIe halves, so four RoCE devices a node. Cable A joins spark1 p0 to spark2 p0, B joins spark2 p1 to
-spark3 p0, C joins spark1 p1 to spark3 p1. RDMA measures 109 Gb/s a plane at MTU 9000. The NCCL
-bootstrap rides the LAN netdev.
+- Three GB10 nodes (spark1, spark2, spark3) in a switchless triangle of QSFP DAC cables. DGX OS 7.6.0 (OTA2610),
+  kernel `7.0.0-1019-nvidia`, driver `580.178.04`, CX7 firmware `28.50.1002` on all three.
+- TP=3, `PARALLEL=8`, a 1,048,576-token window, FP8 KV, KV sharding on, an 800 GiB NVMe spill tier, each rank
+  reads its own NVMe copy of the weights, `COMM=roce` (adopted 2026-11-07, back to NCCL on 2026-11-08 after a
+  memory-guard kill that was not a RoCE fault, adopted again the same day: [docs/results.md](docs/results.md)).
+- The kit defaults that this configuration depends on: `DRAFTER=dflash2`, `DRAFT_POLICY=fnc7:0.3`, `KV=fp8`,
+  `DENSE=q4`, `CONTEXT=1048576`, `VISION=1`, `SPLIT=1`, `KDA_CHUNKED=1`, `COPY=1`, `TF_GLM_MULTI_WINDOW=64`.
+- The image: the kit's published image (`v0.6.0-789e8f3bdfa2`, 123 patches) plus patch
+  `0131-glm-stream-tool-calls` (the same code as kit PR #244) and `MALLOC_ARENA_MAX=2`, then one layer that sets
+  `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (kit issue #143, PR #189).
+- All settings: [`ops/local.sh`](ops/local.sh). The cluster's addresses: one file, `hosts.conf`
+  ([`ops/hosts.conf.example`](ops/hosts.conf.example)).
 
-`scripts/local.sh` carries, with hostnames and addresses redacted:
+## Results
 
-```sh
-TP=3
-COMM=roce                         # since 2026-11-07 under the 48 h watch; nccl before, and the rollback target
-SOCKET_IFNAME=<lan netdev>        # NCCL out-of-band bootstrap; needs the LAN peer firewall rules
-PARALLEL=8
-HF_CACHE=<local nvme>             # each rank reads its own copy; load ~4 min against ~14 over NFS
-WORKER_WEIGHTS=copy
-WORKER_WEIGHTS2=copy
-SPILL_GIB=800
-SPILL_MIN_FREE_GIB=300
-SPILL_MIN_TOKENS=4096
-SPILL_RELEASE_MIB=1024
-TF_GLM_KEPT_BYTES_GIB=4
-export TF_GLM_KV_SHARD=1
-export TF_GLM_CACHE_SHARE_PCT=50
-export TF_GLM_SPILL_READ_BLOCKS=32
-export TF_GLM_EXL3_DEC_ORDER=1
-export TF_GLM_EXIT_ON_BROKEN=1
-export TF_GLM_MULTI_WATCHDOG_EXIT=1
-```
+| | kit TP=3, `PARALLEL=8` | this cluster |
+|---|---|---|
+| KV pool | about 4.0M tokens | 7.6M to 7.8M tokens |
+| prefill, 131K (kit: sparkDash, 4 streams; ours: our gate) | 1,881.7 tok/s | 2,399 tok/s |
+| TTFT p50, 1 stream (kit: sparkDash; ours: our gate) | 143 ms | 104 ms |
+| prose decode, 1 stream, sparkDash | 65.7 tok/s | 69.5 to 69.8 tok/s (`COMM=nccl`), 76.74 (`COMM=roce`) |
+| prose decode, 8 streams, sparkDash | 166.0 tok/s | 178.0 tok/s (`COMM=nccl`), 181.97 (`COMM=roce`) |
+| code decode, 8 streams, sparkDash | 211.5 tok/s | 221.6 tok/s (`COMM=nccl`), 225.07 (`COMM=roce`) |
 
-Defaults inherited from upstream and depended on here: `DRAFTER=dflash2`, `DRAFT_POLICY=fnc7:0.3`,
-`KV=fp8`, `DENSE=q4`, `CONTEXT=1048576`, `VISION=1`, `SPLIT=1`, `KDA_CHUNKED=1`, `COPY=1`,
-`TF_GLM_MULTI_WINDOW=64`.
+The decode rows use the kit's own harness on both sides. The method, the RoCE A/B, the KV-sharding A/B and the
+other figures are in [docs/results.md](docs/results.md).
 
-`DRAFT_POLICY` is already at its measured optimum. A third-party five-policy sweep put `fnc7:0.3`
-first at 54.7 tok/s with every fixed policy 13-20% slower, and the marginal arithmetic agrees: the
-sixth draft returns 0.042 tokens a millisecond against the round's running 0.057, so it loses.
-`fnc9` is an invalid value; the noise-aware families cap N at 7.
+## Contents
 
-## What changed
+| path | what |
+|---|---|
+| `ops/` | the systemd units (templates), the pre-start checks, the watchdog, the memory-guard wrapper, the textfile exporter, the RoCE watch, the 3-rank NCCL check, `local.sh`, `hosts.conf.example`, and their tests |
+| `image/` | the build context of the production image: patch 0131 and `MALLOC_ARENA_MAX=2` on the kit's image, and the expandable_segments layer in `image/es/` |
+| `docs/tp3-bring-up.md` | what a three-node bring-up needs: LAN peer rules, the rendezvous address, CX7 firmware on an uncabled card, HCA pinning on a run of two of the three nodes, KV sharding, TP=3 under systemd |
+| `docs/results.md` | the measurements |
+| `docs/operations.md` | install, start and stop, the watchdog, the memory guard, the RoCE watch, the return to NCCL, the tests |
+| everything else | the kit at `bf5f945`, cut to one configuration (below) |
 
-- **`patches/` is untouched.** It cannot be reduced: `scripts/config.sh` hashes every patch file into
-  `PATCHES_HASH`, and `scripts/prepare.sh` compares that against the pinned image's label. Delete one
-  patch and the kit stops pulling the pinned image and builds locally instead, which must never happen
-  on a serving node. All 123 patches stay, verified byte-identical to `bf5f945`.
-- Removed upstream branding (two PNGs, 992K), the issue and pull-request templates, the funding file,
-  and a Mac Studio qualification document for hardware we do not run.
-- Removed 37 of 54 files in `tools/`: per-patch unit harnesses for engine code we never change. The
-  13 kept are the gates our runbook actually calls, including the KV-shard and spill-tier correctness
-  gates that no upstream benchmark covers.
-- Rewrote this README for one configuration. Upstream's is 127 KB and documents every topology.
-- 51 files and 8,761 lines removed. Tree 5.0 MB to 3.5 MB, 204 tracked files to 153.
+## What changed from the kit
 
-`LICENSE`, `NOTICE`, `CREDITS.md` and `CHANGELOG.md` are kept unchanged. Read `NOTICE` first: it
-carries the third-party notices that travel with this code.
+- `patches/` is identical to the kit at `bf5f945`. `scripts/prepare.sh` sets `PATCHES_HASH` from `image_hash` in
+  `scripts/config.sh`, a hash over every patch file and `IMAGE_EXTRAS`, and compares it with the label of the
+  pinned image. A removed patch makes
+  the kit build locally instead of pulling the image.
+- Removed: the kit's branding images, its issue and pull-request templates, its funding file, a Mac Studio
+  qualification document, `tests/test_hermes_benchmark.py`, and 41 of the 54 files in `tools/` (unit harnesses for engine code this cluster does
+  not change). The 13 kept files are the gates the cluster runs, including the KV-shard and spill-tier gates.
+- This README replaces the kit's README. Read the kit's README for every option and topology.
+- Added: `ops/`, `image/` and the three pages in `docs/`.
+
+`image/tensorfold/cuda/server.py` and `image/tensorfold/cuda/reply_text.py` are TensorFold source files
+(Apache License 2.0, as in the kit's `LICENSE` and `NOTICE`) with the kit's patches and patch 0131 applied; nuk3s
+changed them in 2026-11. The patch file `image/0131-glm-stream-tool-calls.patch` quotes TensorFold source as context.
+
+`LICENSE`, `NOTICE`, `CREDITS.md` and `CHANGELOG.md` are the kit's, unchanged. `NOTICE` carries the third-party
+notices that apply to this code.
 
 ## Credit
 
-The engine, the kit and every patch in `patches/` are other people's work. This fork adds
-measurements and deletions, nothing more.
+The engine, the kit and every patch in `patches/` are the work of other people.
 
-- **[MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold)**, Copyright 2026 MiaAI-Lab, Apache-2.0. The kit, its 123 patches and its documentation. Forked at `bf5f945`.
-- **[ashhart/TensorFold](https://github.com/ashhart/TensorFold)**, Copyright 2026 TensorFold contributors, Apache-2.0 from 0.6.0. The engine every patch here modifies.
-- **[local-inference-lab/b12x](https://github.com/local-inference-lab/b12x)**, Apache-2.0. Its RDMA proxy and CuTe all-gather are the basis of patch 0006.
-- **[jayleaton/glm53-tensorfold-spark](https://github.com/jayleaton/glm53-tensorfold-spark)**, Copyright 2026 Jay Leaton, Apache-2.0. Code adapted in patches 0036, 0046, 0047, and patch 0058 is his TensorFold PR #218 unchanged.
-- The NVMe spill tier and KV sharding (patches 0088, 0128, 0129) are by **Robert Wojciechowski**, with the block layout of PR #118 by **@BadAd84**.
-- **[turboderp-org/exllamav3](https://github.com/turboderp-org/exllamav3)**, MIT. The EXL3 format the routed experts are stored in.
-- **[z-lab/dflash](https://github.com/z-lab/dflash)**, MIT. The DFlash2 architecture the drafter ports.
-- Contributions through upstream's issues and PRs: patch 0054 (abhicnv007), 0057 (Alexbob0), 0060 (kky42), 0059 (Dorian / SxMShaDoW), 0097 (reported by @jdecker76).
+- [MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold), Copyright 2026 MiaAI-Lab, Apache-2.0: the kit, its 123 patches and its documentation. Forked at `bf5f945`.
+- [ashhart/TensorFold](https://github.com/ashhart/TensorFold), Copyright 2026 TensorFold contributors, Apache-2.0 from 0.6.0: the engine that every patch changes.
+- [local-inference-lab/b12x](https://github.com/local-inference-lab/b12x), Apache-2.0: its RDMA proxy and CuTe all-gather are the base of patch 0006.
+- [jayleaton/glm53-tensorfold-spark](https://github.com/jayleaton/glm53-tensorfold-spark), Copyright 2026 Jay Leaton, Apache-2.0: code adapted in patches 0036, 0046 and 0047; patch 0058 is his TensorFold PR #218 unchanged.
+- The NVMe spill tier and KV sharding (patches 0088, 0128 and 0129) are by Robert Wojciechowski, with the block layout of PR #118 by @BadAd84.
+- [turboderp-org/exllamav3](https://github.com/turboderp-org/exllamav3), MIT: the EXL3 format of the routed experts.
+- [z-lab/dflash](https://github.com/z-lab/dflash), MIT: the DFlash2 architecture that the drafter ports.
+- [MiaAI-Lab/sparkDash](https://github.com/MiaAI-Lab/sparkDash), Apache-2.0: the decode harness of the results.
+- [MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks](https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks), Apache-2.0: `scripts/memguard.sh`, which the memory guard runs (`docs/operations.md`; not copied here).
+- Contributions through the kit's issues and PRs: patch 0054 (abhicnv007), 0057 (Alexbob0), 0060 (kky42), 0059 (Dorian / SxMShaDoW), 0097 (reported by @jdecker76).
 
-Model weights are not in this repository. They are downloaded from Hugging Face: the checkpoint
+The model weights are not in this repository. Download them from Hugging Face: the checkpoint
 `Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold`, derived from `zai-org/GLM-5.3-Flash`, and the drafter
-`incoai/GLM-5.3-Flash-DFlash2`. Check each card for its own terms.
+`incoai/GLM-5.3-Flash-DFlash2`. Each card has its own terms.
 
-Neither MiaAI-Lab, TensorFold nor any author above endorses this fork.
+MiaAI-Lab, TensorFold and the authors above do not endorse this repository.

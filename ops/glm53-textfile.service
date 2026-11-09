@@ -1,0 +1,7 @@
+[Unit]
+Description=GLM-5.3 cutover state (marker, glm53-serve, /health, rank container) -> node-exporter textfile
+
+[Service]
+Type=oneshot
+TimeoutStartSec=25
+ExecStart=/usr/local/bin/glm53-textfile.sh
