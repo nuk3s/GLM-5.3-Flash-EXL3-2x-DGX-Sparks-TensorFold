@@ -74,10 +74,10 @@ line, a stall, an unplanned restart or the broken latch (`ops/roce-watch/`). On 
 NCCL after an unplanned restart that was not a RoCE fault: the memory guard on spark3 killed rank 2 at its 2.5 GiB
 floor, because device memory grew with traffic (kit issue #143). The engine logged 0 RoCE errors in the whole watch.
 With the expandable_segments layer (operations.md, "The image") the growth stopped: +2.43 GiB over ten 77K-token
-turns of new kept states, then flat. `COMM=roce` was then adopted again under a new 48-hour watch. A RoCE setup
-error or an all-gather
-timeout ends the rank; the engine does not change to NCCL by itself. `COMM=roce` with `TF_GLM_HC_SPLIT=1` is also
-the environment of kit issue #163, a TP=2 wedge that is still open.
+turns of new kept states, then flat. `COMM=roce` was then adopted again under a new 48-hour watch. That watch
+passed on 2026-11-10. It found no RoCE error line, stall, unplanned restart or broken latch. `COMM=roce` is kept. A
+RoCE setup error or an all-gather timeout ends the rank; the engine does not change to NCCL by itself. `COMM=roce`
+with `TF_GLM_HC_SPLIT=1` is also the environment of kit issue #163, a TP=2 wedge that is still open.
 
 ## KV sharding
 

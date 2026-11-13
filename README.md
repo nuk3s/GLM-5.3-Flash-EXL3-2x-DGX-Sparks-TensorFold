@@ -13,7 +13,8 @@ because the successor does not serve three nodes.
   kernel `7.0.0-1019-nvidia`, driver `580.178.04`, CX7 firmware `28.50.1002` on all three.
 - TP=3, `PARALLEL=8`, a 1,048,576-token window, FP8 KV, KV sharding on, an 800 GiB NVMe spill tier, each rank
   reads its own NVMe copy of the weights, `COMM=roce` (adopted 2026-11-07, back to NCCL on 2026-11-08 after a
-  memory-guard kill that was not a RoCE fault, adopted again the same day: [docs/results.md](docs/results.md)).
+  memory-guard kill that was not a RoCE fault, adopted again the same day and kept after a 48-hour watch passed on
+  2026-11-10: [docs/results.md](docs/results.md)).
 - The kit defaults that this configuration depends on: `DRAFTER=dflash2`, `DRAFT_POLICY=fnc7:0.3`, `KV=fp8`,
   `DENSE=q4`, `CONTEXT=1048576`, `VISION=1`, `SPLIT=1`, `KDA_CHUNKED=1`, `COPY=1`, `TF_GLM_MULTI_WINDOW=64`.
 - The image: the kit's published image (`v0.6.0-789e8f3bdfa2`, 123 patches) plus patch
